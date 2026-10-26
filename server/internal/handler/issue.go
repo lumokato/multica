@@ -4157,9 +4157,10 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		updatedPayload["workflow_handoff"] = workflowHandoffPayload(issue, handoff, h.workflowHandoffBrief(r.Context(), issue, handoff), willRun)
 	}
 	h.publish(protocol.EventIssueUpdated, workspaceID, actorType, actorID, updatedPayload)
-	if statusChanged && actorType != "member" && callerRun != nil {
-		// Agent-driven follow-up status changes are a new origin-chat event;
-		// member edits deliberately remain silent.
+	if statusChanged && actorType != "member" && terminalOriginChatRun(callerRun) {
+		// Agent-driven follow-up status changes are emitted only after the
+		// caller run is terminal; its terminal delivery already carries the
+		// final issue status and avoids a running duplicate.
 		h.TaskService.DeliverIssueResultToOriginChat(r.Context(), *callerRun)
 	}
 	if attachmentsChanged {
@@ -4941,7 +4942,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			batchPayload["workflow_handoff"] = workflowHandoffPayload(issue, handoff, h.workflowHandoffBrief(r.Context(), issue, handoff), willRun)
 		}
 		h.publish(protocol.EventIssueUpdated, workspaceID, actorType, actorID, batchPayload)
-		if statusChanged && actorType != "member" && callerRun != nil {
+		if statusChanged && actorType != "member" && terminalOriginChatRun(callerRun) {
 			h.TaskService.DeliverIssueResultToOriginChat(r.Context(), *callerRun)
 		}
 

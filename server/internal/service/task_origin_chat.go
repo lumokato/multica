@@ -93,8 +93,13 @@ type originChatPayload struct {
 	Error      string
 }
 
-func (s *TaskService) loadOriginChatPayload(ctx context.Context, task db.AgentTaskQueue, issue db.Issue, originTask db.AgentTaskQueue, agent db.Agent, result []byte, failureReason, errorText string) originChatPayload {
-	payload := newOriginChatPayload(task, issue, originTask, agent, result, failureReason, errorText)
+func (s *TaskService) loadOriginChatPayload(ctx context.Context, task db.AgentTaskQueue, issue db.Issue, originTask db.AgentTaskQueue, chatAgent db.Agent, result []byte, failureReason, errorText string) originChatPayload {
+	payload := newOriginChatPayload(task, issue, originTask, chatAgent, result, failureReason, errorText)
+	if executionAgent, err := s.Queries.GetAgent(ctx, task.AgentID); err == nil {
+		payload.Agent = executionAgent
+	} else {
+		slog.Warn("deliver issue result to origin chat: load execution agent failed", "task_id", util.UUIDToString(task.ID), "agent_id", util.UUIDToString(task.AgentID), "error", err)
+	}
 	var completed protocol.TaskCompletedPayload
 	if err := json.Unmarshal(result, &completed); err == nil {
 		payload.Output = completed.Output
@@ -201,10 +206,13 @@ func formatOriginUsage(rows []db.TaskUsage) string {
 
 func formatOriginTime(task db.AgentTaskQueue, messages []db.TaskMessage) string {
 	queued := "?"
-	exec := "?"
 	if task.CreatedAt.Valid && task.StartedAt.Valid {
 		queued = formatOriginDuration(task.StartedAt.Time.Sub(task.CreatedAt.Time))
 	}
+	if !isTerminalOriginTask(task) {
+		return "queued " + queued
+	}
+	exec := "?"
 	if task.StartedAt.Valid && task.CompletedAt.Valid {
 		exec = formatOriginDuration(task.CompletedAt.Time.Sub(task.StartedAt.Time))
 	}
@@ -279,8 +287,10 @@ func deriveOriginMessageTiming(messages []db.TaskMessage) originMessageTiming {
 	for i := 1; i < len(messages); i++ {
 		if messages[i-1].CreatedAt.Valid && messages[i].CreatedAt.Valid {
 			duration := messages[i].CreatedAt.Time.Sub(messages[i-1].CreatedAt.Time)
-			timing.modelTotal += duration
-			modelDurations = append(modelDurations, duration)
+			if duration >= time.Second {
+				timing.modelTotal += duration
+				modelDurations = append(modelDurations, duration)
+			}
 		}
 	}
 	if len(modelDurations) > 0 {
@@ -297,10 +307,22 @@ func formatOriginTrigger(task db.AgentTaskQueue) string {
 	} else if task.TriggerEvidenceKind.Valid && task.TriggerEvidenceKind.String != "" {
 		kind = task.TriggerEvidenceKind.String
 	}
+	if kind == "issue_assignment" || (kind == "delegation" && task.TriggerEvidenceRefID.Valid && task.IssueID.Valid && task.TriggerEvidenceRefID == task.IssueID) {
+		return "assignment"
+	}
 	if task.TriggerEvidenceRefID.Valid {
 		return kind + " · " + util.UUIDToString(task.TriggerEvidenceRefID)
 	}
 	return kind
+}
+
+func isTerminalOriginTask(task db.AgentTaskQueue) bool {
+	switch task.Status {
+	case "completed", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 func formatOriginPR(raw string) string {

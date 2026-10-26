@@ -146,6 +146,18 @@ func writeIssueWorkflowError(w http.ResponseWriter, err error) bool {
 // agentRunOnIssue returns the calling agent's run when it works on this issue,
 // nil for members and for runs on other issues. The task id is the
 // server-trusted X-Task-ID resolveActor vouched for.
+func terminalOriginChatRun(task *db.AgentTaskQueue) bool {
+	if task == nil {
+		return false
+	}
+	switch task.Status {
+	case "completed", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
 func (h *Handler) agentRunOnIssue(r *http.Request, actorType string, issue db.Issue) *db.AgentTaskQueue {
 	if actorType != "agent" {
 		return nil
