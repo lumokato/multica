@@ -101,7 +101,37 @@ func TestOriginChatEmptyPayloadFallsBackToLastTextOrComment(t *testing.T) {
 
 func TestOriginMessageTimingWithoutMessages(t *testing.T) {
 	got := formatOriginTime(db.AgentTaskQueue{}, nil)
-	if got != "queued ? · exec ?" {
+	if got != "queued ?" {
 		t.Fatalf("time = %q", got)
+	}
+}
+
+func TestOriginMessageTimingRunningOmitsExecutionAndDerivedDurations(t *testing.T) {
+	base := time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
+	got := formatOriginTime(db.AgentTaskQueue{
+		Status: "running", CreatedAt: pgtype.Timestamptz{Time: base, Valid: true}, StartedAt: pgtype.Timestamptz{Time: base.Add(time.Second), Valid: true},
+	}, []db.TaskMessage{{Type: "text", CreatedAt: pgtype.Timestamptz{Time: base.Add(2 * time.Second), Valid: true}}, {Type: "text", CreatedAt: pgtype.Timestamptz{Time: base.Add(3 * time.Second), Valid: true}}})
+	if got != "queued 1s" {
+		t.Fatalf("running time = %q", got)
+	}
+}
+
+func TestOriginMessageTimingFiltersSubsecondIntervals(t *testing.T) {
+	base := time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
+	got := formatOriginTime(db.AgentTaskQueue{Status: "completed"}, []db.TaskMessage{
+		{Type: "text", CreatedAt: pgtype.Timestamptz{Time: base, Valid: true}},
+		{Type: "text", CreatedAt: pgtype.Timestamptz{Time: base.Add(500 * time.Millisecond), Valid: true}},
+		{Type: "text", CreatedAt: pgtype.Timestamptz{Time: base.Add(3 * time.Second), Valid: true}},
+	})
+	if !strings.Contains(got, "model≈2s（中位 2s，派生）") {
+		t.Fatalf("filtered timing = %q", got)
+	}
+}
+
+func TestOriginTriggerAssignmentDoesNotExposeIssueID(t *testing.T) {
+	id := originUUID("issue")
+	got := formatOriginTrigger(db.AgentTaskQueue{IssueID: id, TriggerEvidenceKind: pgtype.Text{String: "issue_assignment", Valid: true}, TriggerEvidenceRefID: id})
+	if got != "assignment" {
+		t.Fatalf("trigger = %q", got)
 	}
 }
