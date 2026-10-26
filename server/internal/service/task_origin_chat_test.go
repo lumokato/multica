@@ -66,7 +66,7 @@ func TestFormatOriginChatResultFailureAndNoOptionalFields(t *testing.T) {
 		Error:      "provider said https://secret.invalid/token",
 	}
 	got := formatOriginChatResultWithPrefix("PER", p)
-	for _, want := range []string{"| run | failed · attempt 2", "| failure_reason | agent_error.provider |", "| error | provider said [链接已省略] |", "queued ? · exec ?", "⟦任务结果结束⟧"} {
+	for _, want := range []string{"| run | failed · attempt 2", "| failure_reason | agent_error.provider |", "| error | provider said [链接已省略] |", "queued — · 未启动", "⟦任务结果结束⟧"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("result missing %q:\n%s", want, got)
 		}
@@ -101,8 +101,51 @@ func TestOriginChatEmptyPayloadFallsBackToLastTextOrComment(t *testing.T) {
 
 func TestOriginMessageTimingWithoutMessages(t *testing.T) {
 	got := formatOriginTime(db.AgentTaskQueue{}, nil)
-	if got != "queued ?" {
+	if got != "queued —" {
 		t.Fatalf("time = %q", got)
+	}
+}
+
+func TestOriginMessageTimingCancelledBeforeStartOmitsExecution(t *testing.T) {
+	base := time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
+	got := formatOriginTime(db.AgentTaskQueue{
+		Status:      "cancelled",
+		CreatedAt:   pgtype.Timestamptz{Time: base, Valid: true},
+		CompletedAt: pgtype.Timestamptz{Time: base.Add(3 * time.Second), Valid: true},
+	}, nil)
+	if got != "queued 3s · 未启动" {
+		t.Fatalf("cancelled-before-start time = %q", got)
+	}
+	if strings.Contains(got, "?") || strings.Contains(got, "exec") {
+		t.Fatalf("cancelled-before-start time must not invent an execution segment: %q", got)
+	}
+}
+
+func TestOriginMessageTimingCompletedWithoutStartTimeOmitsExecution(t *testing.T) {
+	base := time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
+	got := formatOriginTime(db.AgentTaskQueue{
+		Status:      "completed",
+		CreatedAt:   pgtype.Timestamptz{Time: base, Valid: true},
+		CompletedAt: pgtype.Timestamptz{Time: base.Add(45 * time.Second), Valid: true},
+	}, nil)
+	if got != "queued 45s · 未启动" {
+		t.Fatalf("completed-without-start time = %q", got)
+	}
+}
+
+func TestOriginMessageTimingNeverEmitsQuestionMark(t *testing.T) {
+	base := time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
+	cases := []db.AgentTaskQueue{
+		{Status: "queued", CreatedAt: pgtype.Timestamptz{Time: base, Valid: true}},
+		{Status: "running", CreatedAt: pgtype.Timestamptz{Time: base, Valid: true}, StartedAt: pgtype.Timestamptz{Time: base.Add(time.Second), Valid: true}},
+		{Status: "completed", CreatedAt: pgtype.Timestamptz{Time: base, Valid: true}, StartedAt: pgtype.Timestamptz{Time: base.Add(time.Second), Valid: true}, CompletedAt: pgtype.Timestamptz{Time: base.Add(4 * time.Second), Valid: true}},
+		{Status: "failed", StartedAt: pgtype.Timestamptz{Time: base, Valid: true}},
+		{Status: "cancelled", CreatedAt: pgtype.Timestamptz{Time: base, Valid: true}},
+	}
+	for _, task := range cases {
+		if got := formatOriginTime(task, nil); strings.Contains(got, "?") {
+			t.Fatalf("time for %s contains a placeholder: %q", task.Status, got)
+		}
 	}
 }
 
@@ -118,7 +161,11 @@ func TestOriginMessageTimingRunningOmitsExecutionAndDerivedDurations(t *testing.
 
 func TestOriginMessageTimingFiltersSubsecondIntervals(t *testing.T) {
 	base := time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
-	got := formatOriginTime(db.AgentTaskQueue{Status: "completed"}, []db.TaskMessage{
+	got := formatOriginTime(db.AgentTaskQueue{
+		Status:      "completed",
+		StartedAt:   pgtype.Timestamptz{Time: base, Valid: true},
+		CompletedAt: pgtype.Timestamptz{Time: base.Add(10 * time.Second), Valid: true},
+	}, []db.TaskMessage{
 		{Type: "text", CreatedAt: pgtype.Timestamptz{Time: base, Valid: true}},
 		{Type: "text", CreatedAt: pgtype.Timestamptz{Time: base.Add(500 * time.Millisecond), Valid: true}},
 		{Type: "text", CreatedAt: pgtype.Timestamptz{Time: base.Add(3 * time.Second), Valid: true}},

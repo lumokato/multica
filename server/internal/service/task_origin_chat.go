@@ -205,18 +205,31 @@ func formatOriginUsage(rows []db.TaskUsage) string {
 }
 
 func formatOriginTime(task db.AgentTaskQueue, messages []db.TaskMessage) string {
-	queued := "?"
+	terminal := isTerminalOriginTask(task)
+	// Never write a bare "?" for a missing timestamp: a queued run has no
+	// execution segment yet, and a run cancelled before dispatch never gets
+	// one, so both are stated instead of guessed.
+	queued := "—"
 	if task.CreatedAt.Valid && task.StartedAt.Valid {
 		queued = formatOriginDuration(task.StartedAt.Time.Sub(task.CreatedAt.Time))
+	} else if terminal && task.CreatedAt.Valid && task.CompletedAt.Valid {
+		queued = formatOriginDuration(task.CompletedAt.Time.Sub(task.CreatedAt.Time))
 	}
-	if !isTerminalOriginTask(task) {
-		return "queued " + queued
+	out := "queued " + queued
+	if !task.StartedAt.Valid {
+		if terminal {
+			out += " · 未启动"
+		}
+		return out
 	}
-	exec := "?"
-	if task.StartedAt.Valid && task.CompletedAt.Valid {
+	if !terminal {
+		return out
+	}
+	exec := "—"
+	if task.CompletedAt.Valid {
 		exec = formatOriginDuration(task.CompletedAt.Time.Sub(task.StartedAt.Time))
 	}
-	out := "queued " + queued + " · exec " + exec
+	out += " · exec " + exec
 	if len(messages) == 0 {
 		return out
 	}
