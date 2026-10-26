@@ -886,6 +886,9 @@ func (s *TaskService) captureTaskFailed(ctx context.Context, task db.AgentTaskQu
 }
 
 func (s *TaskService) captureTaskCancelled(ctx context.Context, task db.AgentTaskQueue) {
+	if task.IssueID.Valid {
+		s.deliverIssueResultToOriginChat(ctx, task, task.Result, "", task.Error.String)
+	}
 	if s.Metrics != nil {
 		source, runtimeMode, _ := s.taskMetricsContext(ctx, task)
 		s.Metrics.RecordTaskTerminal(util.UUIDToString(task.ID), source, runtimeMode, task.Status, taskRunSeconds(task), taskTotalSeconds(task), task.Attempt)
@@ -4789,7 +4792,7 @@ func (s *TaskService) CompleteTaskWithTransition(ctx context.Context, taskID pgt
 		// Deliver only after the completion transaction and its broadcasts. The
 		// direct-chat send is a separate transaction and must not be part of the
 		// issue/task completion critical path.
-		s.deliverIssueResultToOriginChat(ctx, task, result)
+		s.deliverIssueResultToOriginChat(ctx, task, result, "", "")
 	}
 
 	return &task, true, nil
@@ -5411,6 +5414,11 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 	// was persisted in the chat transcript. A retry-pending attempt stays silent
 	// because its child reports the eventual terminal outcome.
 	s.broadcastTaskFailedEvent(ctx, task, errMsg, failureReason, retried != nil)
+	if task.IssueID.Valid && retried == nil {
+		// A retry-pending failure is an intermediate event. The terminal retry
+		// owns the single origin-chat result message.
+		s.deliverIssueResultToOriginChat(ctx, task, task.Result, failureReason, errMsg)
+	}
 
 	return &task, true, nil
 }

@@ -4157,6 +4157,11 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		updatedPayload["workflow_handoff"] = workflowHandoffPayload(issue, handoff, h.workflowHandoffBrief(r.Context(), issue, handoff), willRun)
 	}
 	h.publish(protocol.EventIssueUpdated, workspaceID, actorType, actorID, updatedPayload)
+	if statusChanged && actorType != "member" && callerRun != nil {
+		// Agent-driven follow-up status changes are a new origin-chat event;
+		// member edits deliberately remain silent.
+		h.TaskService.DeliverIssueResultToOriginChat(r.Context(), *callerRun)
+	}
 	if attachmentsChanged {
 		// The full owner snapshot must be admitted before an auxiliary event at
 		// the same revision. Otherwise clients advance only the revision here and
@@ -4936,6 +4941,9 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			batchPayload["workflow_handoff"] = workflowHandoffPayload(issue, handoff, h.workflowHandoffBrief(r.Context(), issue, handoff), willRun)
 		}
 		h.publish(protocol.EventIssueUpdated, workspaceID, actorType, actorID, batchPayload)
+		if statusChanged && actorType != "member" && callerRun != nil {
+			h.TaskService.DeliverIssueResultToOriginChat(r.Context(), *callerRun)
+		}
 
 		// Reassignment does not cancel existing tasks (#4963 / MUL-4113) —
 		// mirrors UpdateIssue. See that handler for the rationale.
