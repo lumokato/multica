@@ -430,6 +430,16 @@ ORDER BY c.created_at ASC, c.id ASC;
 SELECT * FROM comment
 WHERE id = $1;
 
+-- name: GetLastAgentCommentForTask :one
+SELECT * FROM comment
+WHERE issue_id = @issue_id
+  AND workspace_id = @workspace_id
+  AND source_task_id = @source_task_id
+  AND author_type = 'agent'
+  AND NULLIF(BTRIM(content), '') IS NOT NULL
+ORDER BY created_at DESC, id DESC
+LIMIT 1;
+
 -- name: GetCommentInWorkspace :one
 SELECT * FROM comment
 WHERE id = $1 AND workspace_id = $2;

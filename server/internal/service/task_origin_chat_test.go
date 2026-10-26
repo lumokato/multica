@@ -76,6 +76,29 @@ func TestFormatOriginChatResultFailureAndNoOptionalFields(t *testing.T) {
 	}
 }
 
+func TestOriginChatEmptyPayloadFallsBackToLastTextOrComment(t *testing.T) {
+	payload := newOriginChatPayload(
+		db.AgentTaskQueue{Status: "completed", Attempt: 1},
+		db.Issue{Number: 306, Status: "done"},
+		db.AgentTaskQueue{}, db.Agent{},
+		[]byte(`{"pr_url":"","output":"","session_id":"session","work_dir":"/Users/tau/work"}`), "", "",
+	)
+	messages := []db.TaskMessage{{Seq: 1, Type: "text", Content: pgtype.Text{String: "last assistant text", Valid: true}}}
+	if got := chooseOriginChatOutput(payload.Output, messages, "last agent comment", "PER-306"); got != "last assistant text" {
+		t.Fatalf("text fallback = %q", got)
+	}
+	if got := chooseOriginChatOutput("", nil, "last agent comment", "PER-306"); got != "last agent comment" {
+		t.Fatalf("comment fallback = %q", got)
+	}
+	if got := chooseOriginChatOutput("", nil, "", "PER-306"); got != "本次 run 无文本输出，见 issue PER-306 评论" {
+		t.Fatalf("empty fallback = %q", got)
+	}
+	got := originChatResultBody([]byte("See https://github.com/example/pr/1 and /Users/tau/work"))
+	if !strings.Contains(got, "https://github.com/example/pr/1") || strings.Contains(got, "/Users/") {
+		t.Fatalf("body URL should remain while local path is removed: %q", got)
+	}
+}
+
 func TestOriginMessageTimingWithoutMessages(t *testing.T) {
 	got := formatOriginTime(db.AgentTaskQueue{}, nil)
 	if got != "queued ? · exec ?" {
