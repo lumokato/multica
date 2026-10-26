@@ -5,7 +5,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -42,7 +44,7 @@ const errTaskTokenWorkspaceMismatch = "task token is bound to a different worksp
 //   - 404 unknown workspace slug
 //   - 403 selector resolves to a different workspace than the token's
 //   - 500 slug lookup failed for a reason other than "not found"
-func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queries *db.Queries, boundWorkspaceID string) bool {
+func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queries *db.Queries, boundWorkspaceID string, policy *CrossWorkspacePolicy) (bool, string) {
 	// r.URL.Query() silently drops pairs it cannot decode (bad percent
 	// escapes, unencoded ';'), so `workspace_slug=ws-b%zz` would look like
 	// "no selector" and fall through to the bound workspace. Parse strictly
@@ -56,10 +58,10 @@ func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queri
 			"error", err,
 		)
 		writeError(w, http.StatusBadRequest, "malformed query string")
-		return true
+		return true, ""
 	}
 
-	reject := func(status int, msg, selector, value string) bool {
+	reject := func(status int, msg, selector, value string) (bool, string) {
 		slog.Warn("auth: task token workspace selector rejected",
 			"path", r.URL.Path,
 			"method", r.Method,
@@ -69,8 +71,10 @@ func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queri
 			"status", status,
 		)
 		writeError(w, status, msg)
-		return true
+		return true, ""
 	}
+
+	resolvedTargets := []string{}
 
 	// UUID selectors: compare canonical forms so casing / formatting
 	// differences of the same workspace are not mistaken for a conflict.
@@ -81,6 +85,24 @@ func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queri
 		{"header:X-Workspace-ID", r.Header.Values("X-Workspace-ID")},
 		{"query:workspace_id", query["workspace_id"]},
 	}
+	if strings.HasPrefix(r.URL.Path, "/api/workspaces/") {
+		id := chi.URLParam(r, "id")
+		if id != "" {
+			idSelectors = append(idSelectors, struct {
+				name   string
+				values []string
+			}{"path:workspace", []string{id}})
+		}
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/daemon/workspaces/") {
+		id := chi.URLParam(r, "workspaceId")
+		if id != "" {
+			idSelectors = append(idSelectors, struct {
+				name   string
+				values []string
+			}{"path:daemon_workspace", []string{id}})
+		}
+	}
 	for _, sel := range idSelectors {
 		for _, v := range sel.values {
 			if v == "" {
@@ -90,9 +112,11 @@ func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queri
 			if err != nil {
 				return reject(http.StatusBadRequest, "invalid workspace_id", sel.name, v)
 			}
-			if util.UUIDToString(parsed) != boundWorkspaceID {
+			candidate := util.UUIDToString(parsed)
+			if len(resolvedTargets) > 0 && resolvedTargets[0] != candidate {
 				return reject(http.StatusForbidden, errTaskTokenWorkspaceMismatch, sel.name, v)
 			}
+			resolvedTargets = appendUniqueTarget(resolvedTargets, candidate)
 		}
 	}
 
@@ -120,15 +144,36 @@ func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queri
 					}
 					slog.Error("auth: task token workspace slug lookup failed", "path", r.URL.Path, "error", err)
 					writeError(w, http.StatusInternalServerError, "failed to resolve workspace")
-					return true
+					return true, ""
 				}
 				id = util.UUIDToString(ws.ID)
 				resolved[slug] = id
 			}
-			if id != boundWorkspaceID {
+			if len(resolvedTargets) > 0 && resolvedTargets[0] != id {
 				return reject(http.StatusForbidden, errTaskTokenWorkspaceMismatch, sel.name, slug)
 			}
+			resolvedTargets = appendUniqueTarget(resolvedTargets, id)
 		}
 	}
-	return false
+
+	effective := boundWorkspaceID
+	if len(resolvedTargets) > 0 {
+		effective = resolvedTargets[0]
+	}
+	if !policy.allows(boundWorkspaceID, effective) {
+		return reject(http.StatusForbidden, errTaskTokenWorkspaceMismatch, "workspace", effective)
+	}
+	if effective != boundWorkspaceID && !policy.allowDestructive && isCrossWorkspaceDestructivePath(r.Method, r.URL.Path) {
+		return reject(http.StatusForbidden, "cross-workspace destructive operation denied", "path", r.URL.Path)
+	}
+	return false, effective
+}
+
+func appendUniqueTarget(targets []string, target string) []string {
+	for _, existing := range targets {
+		if existing == target {
+			return targets
+		}
+	}
+	return append(targets, target)
 }

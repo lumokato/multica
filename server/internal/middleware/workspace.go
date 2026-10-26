@@ -214,9 +214,22 @@ func buildMiddleware(queries *db.Queries, resolve workspaceResolver, roles []str
 			// stamped into its task token. This is the catch-all
 			// behind resolveWorkspaceUUID's earlier check. MUL-2600.
 			if r.Header.Get("X-Actor-Source") == "task_token" {
-				bound := r.Header.Get("X-Workspace-ID")
-				if bound == "" || workspaceID != bound {
+				bound := r.Header.Get("X-Token-Workspace-ID")
+				if bound == "" {
+					// Keep direct middleware tests and older in-process callers
+					// compatible; Auth always stamps the authoritative header.
+					bound = r.Header.Get("X-Workspace-ID")
+				}
+				if bound == "" {
 					writeError(w, http.StatusForbidden, "task token is bound to a different workspace")
+					return
+				}
+				if !crossWorkspaceAllows(bound, workspaceID) {
+					writeError(w, http.StatusForbidden, "task token is bound to a different workspace")
+					return
+				}
+				if bound != workspaceID && !crossWorkspaceDestructiveAllowed(bound, workspaceID, r.Method, r.URL.Path) {
+					writeError(w, http.StatusForbidden, "cross-workspace destructive operation denied")
 					return
 				}
 			}
