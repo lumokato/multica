@@ -100,17 +100,37 @@ func (s *TaskService) loadOriginChatPayload(ctx context.Context, task db.AgentTa
 		payload.Output = completed.Output
 		payload.PRURL = completed.PRURL
 	}
-	if rows, err := s.Queries.GetTaskUsage(ctx, task.ID); err == nil {
-		payload.Usage = rows
-	} else {
-		slog.Warn("deliver issue result to origin chat: load usage failed", "task_id", util.UUIDToString(task.ID), "error", err)
-	}
 	if rows, err := s.Queries.ListTaskMessages(ctx, task.ID); err == nil {
 		payload.Messages = rows
 	} else {
 		slog.Warn("deliver issue result to origin chat: load task messages failed", "task_id", util.UUIDToString(task.ID), "error", err)
 	}
+	lastComment := ""
+	if comment, err := s.Queries.GetLastAgentCommentForTask(ctx, db.GetLastAgentCommentForTaskParams{IssueID: issue.ID, WorkspaceID: issue.WorkspaceID, SourceTaskID: task.ID}); err == nil {
+		lastComment = comment.Content
+	}
+	payload.Output = chooseOriginChatOutput(payload.Output, payload.Messages, lastComment, IssueIdentifier(s.getIssuePrefix(issue.WorkspaceID), issue.Number))
+	if rows, err := s.Queries.GetTaskUsage(ctx, task.ID); err == nil {
+		payload.Usage = rows
+	} else {
+		slog.Warn("deliver issue result to origin chat: load usage failed", "task_id", util.UUIDToString(task.ID), "error", err)
+	}
 	return payload
+}
+
+func chooseOriginChatOutput(output string, messages []db.TaskMessage, lastComment, issueKey string) string {
+	if strings.TrimSpace(output) != "" {
+		return output
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Type == "text" && strings.TrimSpace(messages[i].Content.String) != "" {
+			return messages[i].Content.String
+		}
+	}
+	if strings.TrimSpace(lastComment) != "" {
+		return lastComment
+	}
+	return fmt.Sprintf("本次 run 无文本输出，见 issue %s 评论", issueKey)
 }
 
 func newOriginChatPayload(task db.AgentTaskQueue, issue db.Issue, originTask db.AgentTaskQueue, agent db.Agent, result []byte, failureReason, errorText string) originChatPayload {
@@ -309,14 +329,26 @@ func safeCell(value string) string {
 
 func originChatResultBody(result []byte) string {
 	body := strings.TrimSpace(redact.Text(string(result)))
-	// Result metadata must never turn an origin-chat message into a clickable
-	// external link. Keep the execution output readable while hiding full URLs.
-	body = redactOriginChatURLs(body)
+	body = redactOriginChatLocalPaths(body)
 	runes := []rune(body)
 	if len(runes) > maxOriginChatResultRunes {
 		body = string(runes[:maxOriginChatResultRunes-1]) + "…"
 	}
 	return body
+}
+
+func redactOriginChatLocalPaths(body string) string {
+	for {
+		start := strings.Index(body, "/Users/")
+		if start < 0 {
+			return body
+		}
+		end := start
+		for end < len(body) && !strings.ContainsRune(" \t\r\n<>[]()'\"", rune(body[end])) {
+			end++
+		}
+		body = body[:start] + "[本机路径已省略]" + body[end:]
+	}
 }
 
 func redactOriginChatURLs(body string) string {
