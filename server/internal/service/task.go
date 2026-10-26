@@ -4785,6 +4785,12 @@ func (s *TaskService) CompleteTaskWithTransition(ctx context.Context, taskID pgt
 
 	// Broadcast
 	s.broadcastTaskEvent(ctx, protocol.EventTaskCompleted, task)
+	if task.IssueID.Valid {
+		// Deliver only after the completion transaction and its broadcasts. The
+		// direct-chat send is a separate transaction and must not be part of the
+		// issue/task completion critical path.
+		s.deliverIssueResultToOriginChat(ctx, task, result)
+	}
 
 	return &task, true, nil
 }
