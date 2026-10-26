@@ -99,6 +99,7 @@ func (r fakeRow) Scan(dest ...any) error {
 // any other workspace is refused before the handler runs, instead of being
 // silently replaced by A (GitHub #9403).
 func TestAuth_TaskTokenWorkspaceSelectors(t *testing.T) {
+	t.Setenv("MULTICA_CROSS_WORKSPACE_AGENT_ACCESS", "")
 	cases := []struct {
 		name       string
 		method     string
@@ -230,7 +231,92 @@ func TestAuth_TaskTokenWorkspaceSelectors(t *testing.T) {
 // TestAuth_JWTWorkspaceSelectorUntouched is the control for the task-token
 // check: human JWT sessions keep choosing their workspace through headers,
 // and Auth must neither validate nor rewrite that choice.
+func TestAuth_TaskTokenCrossWorkspaceAccess(t *testing.T) {
+	const targetPath = "/api/projects"
+
+	t.Run("configured target is allowed and preserves token binding", func(t *testing.T) {
+		t.Setenv("MULTICA_CROSS_WORKSPACE_AGENT_ACCESS", ttWorkspaceA+">"+ttWorkspaceB)
+		var gotWorkspace, gotTokenWorkspace string
+		handler := Auth(db.New(&fakeTaskTokenDB{t: t}), nil, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotWorkspace = r.Header.Get("X-Workspace-ID")
+			gotTokenWorkspace = r.Header.Get("X-Token-Workspace-ID")
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, targetPath, nil)
+		req.Header.Set("Authorization", "Bearer "+ttTestToken)
+		req.Header.Set("X-Workspace-ID", ttWorkspaceB)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+		}
+		if gotWorkspace != ttWorkspaceB || gotTokenWorkspace != ttWorkspaceA {
+			t.Fatalf("workspace headers = target %q, token %q; want target %q, token %q", gotWorkspace, gotTokenWorkspace, ttWorkspaceB, ttWorkspaceA)
+		}
+	})
+
+	t.Run("unconfigured target remains forbidden", func(t *testing.T) {
+		t.Setenv("MULTICA_CROSS_WORKSPACE_AGENT_ACCESS", "")
+		handler := Auth(db.New(&fakeTaskTokenDB{t: t}), nil, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("handler must not run")
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, targetPath, nil)
+		req.Header.Set("Authorization", "Bearer "+ttTestToken)
+		req.Header.Set("X-Workspace-ID", ttWorkspaceB)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 (body %s)", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("destructive target is denied by default", func(t *testing.T) {
+		t.Setenv("MULTICA_CROSS_WORKSPACE_AGENT_ACCESS", ttWorkspaceA+">"+ttWorkspaceB)
+		handler := Auth(db.New(&fakeTaskTokenDB{t: t}), nil, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("handler must not run")
+		}))
+
+		req := httptest.NewRequest(http.MethodDelete, "/api/workspaces/"+ttWorkspaceB, nil)
+		req.Header.Set("Authorization", "Bearer "+ttTestToken)
+		req.Header.Set("X-Workspace-ID", ttWorkspaceB)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 (body %s)", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("destructive target can be explicitly enabled", func(t *testing.T) {
+		t.Setenv("MULTICA_CROSS_WORKSPACE_AGENT_ACCESS", ttWorkspaceA+">"+ttWorkspaceB)
+		t.Setenv("MULTICA_CROSS_WORKSPACE_AGENT_ACCESS_ALLOW_DESTRUCTIVE", "1")
+		called := false
+		handler := Auth(db.New(&fakeTaskTokenDB{t: t}), nil, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodDelete, "/api/workspaces/"+ttWorkspaceB, nil)
+		req.Header.Set("Authorization", "Bearer "+ttTestToken)
+		req.Header.Set("X-Workspace-ID", ttWorkspaceB)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK || !called {
+			t.Fatalf("status = %d, called = %v, want 200 and called (body %s)", w.Code, called, w.Body.String())
+		}
+	})
+}
+
+// TestAuth_JWTWorkspaceSelectorUntouched is the control for the task-token
+// check: human JWT sessions keep choosing their workspace through headers,
+// and Auth must neither validate nor rewrite that choice.
 func TestAuth_JWTWorkspaceSelectorUntouched(t *testing.T) {
+	t.Setenv("MULTICA_CROSS_WORKSPACE_AGENT_ACCESS", "")
 	var gotWorkspace string
 	handler := Auth(nil, nil, nil, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotWorkspace = r.Header.Get("X-Workspace-ID")

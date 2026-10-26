@@ -57,6 +57,7 @@ func rejectTemporarilyDisabledUser(w http.ResponseWriter, r *http.Request, userI
 // prefix branch — we don't fall through to the mul_ / JWT paths, since
 // an mcn_ string is by construction not a valid mul_ PAT or JWT.
 func Auth(queries *db.Queries, patCache *auth.PATCache, cloudPAT *auth.CloudPATVerifier, cfSigner *auth.CloudFrontSigner) func(http.Handler) http.Handler {
+	crossWorkspacePolicy := NewCrossWorkspacePolicyFromEnv()
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// X-Actor-Source is server-set only — any value supplied by
@@ -129,13 +130,18 @@ func Auth(queries *db.Queries, patCache *auth.PATCache, cloudPAT *auth.CloudPATV
 				// below erases what the client asked for. Silently
 				// swapping the target let a request for workspace B run
 				// against A (GitHub #9403).
-				if checkTaskTokenWorkspaceTarget(w, r, queries, boundWorkspaceID) {
+				handled, effectiveWorkspaceID := checkTaskTokenWorkspaceTarget(w, r, queries, boundWorkspaceID, crossWorkspacePolicy)
+				if handled {
 					return
 				}
 				r.Header.Set("X-User-ID", userID)
 				r.Header.Set("X-Agent-ID", uuidToString(tt.AgentID))
 				r.Header.Set("X-Task-ID", uuidToString(tt.TaskID))
-				r.Header.Set("X-Workspace-ID", boundWorkspaceID)
+				r.Header.Set("X-Workspace-ID", effectiveWorkspaceID)
+				r.Header.Set("X-Token-Workspace-ID", boundWorkspaceID)
+				if effectiveWorkspaceID != boundWorkspaceID {
+					slog.Info("auth: cross-workspace agent access", "source", boundWorkspaceID, "target", effectiveWorkspaceID, "agent", uuidToString(tt.AgentID), "task", uuidToString(tt.TaskID), "path", r.URL.Path, "method", r.Method)
+				}
 				// X-Actor-Source flags the auth path so resolveActor and
 				// any owner-only handler can deny without re-querying the
 				// token table. The value "task_token" is the only signal
