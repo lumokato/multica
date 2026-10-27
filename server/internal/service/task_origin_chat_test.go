@@ -1,11 +1,17 @@
 package service
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/internal/testutil"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -180,5 +186,115 @@ func TestOriginTriggerAssignmentDoesNotExposeIssueID(t *testing.T) {
 	got := formatOriginTrigger(db.AgentTaskQueue{IssueID: id, TriggerEvidenceKind: pgtype.Text{String: "issue_assignment", Valid: true}, TriggerEvidenceRefID: id})
 	if got != "assignment" {
 		t.Fatalf("trigger = %q", got)
+	}
+}
+
+// The card's identity is the idempotency key: the same run delivering to the
+// same session must always derive the same primary key, and a different run
+// (or session) must not.
+func TestOriginChatResultMessageIDIsStablePerDelivery(t *testing.T) {
+	// originUUID is constant by design (it only fills in "any id"), so distinct
+	// keys here are built from uuid.NewSHA1 instead.
+	key := func(name string) pgtype.UUID {
+		return pgtype.UUID{Bytes: [16]byte(uuid.NewSHA1(uuid.NameSpaceOID, []byte(name))), Valid: true}
+	}
+	session, task := key("session"), key("task")
+	first := originChatResultMessageID(session, task)
+	if second := originChatResultMessageID(session, task); first != second {
+		t.Fatalf("same delivery derived two ids: %v vs %v", first, second)
+	}
+	if !first.Valid {
+		t.Fatal("derived id is not valid")
+	}
+	if other := originChatResultMessageID(session, key("other task")); other == first {
+		t.Fatalf("two runs share a delivery key: %v", first)
+	}
+	if other := originChatResultMessageID(key("other session"), task); other == first {
+		t.Fatalf("two sessions share a delivery key: %v", first)
+	}
+}
+
+// LS-173: a delivered result must be one task-less assistant card per run, and
+// redelivering the same run must not append a second card or enqueue a chat
+// turn. The pre-fix path went through SendDirectChatMessage, which opened a
+// task per card and therefore re-ran the agent.
+func TestDeliverIssueResultToOriginChatWritesOneTasklessCard(t *testing.T) {
+	ctx := context.Background()
+	pool := sharedTestPool(t)
+	suffix := time.Now().UnixNano()
+	fx := testutil.New(pool, "", "")
+	fx.UserID = fx.User(t, "origin chat result", fmt.Sprintf("origin-chat-result-%d@example.test", suffix))
+	fx.WorkspaceID = fx.Workspace(t, "origin chat result", fmt.Sprintf("origin-chat-result-%d", suffix))
+	fx.Member(t, fx.WorkspaceID, fx.UserID, "owner")
+	runtimeID := fx.Runtime(t, "origin chat result")
+	agentID := fx.Agent(t, "origin chat result", runtimeID)
+	sessionID := fx.ChatSession(t, agentID)
+	fx.Cleanup(t, "DELETE FROM chat_message WHERE chat_session_id=$1", sessionID)
+
+	// The chat turn that created the issue, so the result has somewhere to go.
+	originTaskID := fx.Task(t, agentID, testutil.Cols{
+		"runtime_id":      runtimeID,
+		"chat_session_id": sessionID,
+		"status":          "completed",
+	})
+	issueID := fx.Issue(t, "origin chat result", testutil.Cols{
+		"status":        "in_review",
+		"origin_type":   "agent_create",
+		"origin_id":     originTaskID,
+		"assignee_type": "agent",
+		"assignee_id":   agentID,
+	})
+	runID := fx.Task(t, agentID, testutil.Cols{
+		"runtime_id": runtimeID,
+		"issue_id":   issueID,
+		"status":     "completed",
+		"result":     []byte(`{"output":"finished the work"}`),
+	})
+
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+	run, err := svc.Queries.GetAgentTask(ctx, util.MustParseUUID(runID))
+	if err != nil {
+		t.Fatalf("load run: %v", err)
+	}
+
+	svc.DeliverIssueResultToOriginChat(ctx, run)
+	svc.DeliverIssueResultToOriginChat(ctx, run)
+
+	rows, err := pool.Query(ctx, `SELECT role, task_id IS NULL, content FROM chat_message WHERE chat_session_id=$1`, sessionID)
+	if err != nil {
+		t.Fatalf("read cards: %v", err)
+	}
+	defer rows.Close()
+	var cards int
+	for rows.Next() {
+		var role, content string
+		var taskless bool
+		if err := rows.Scan(&role, &taskless, &content); err != nil {
+			t.Fatalf("scan card: %v", err)
+		}
+		cards++
+		if role != "assistant" {
+			t.Fatalf("card role = %q, want assistant (a task-less user row would be adopted by the next input batch)", role)
+		}
+		if !taskless {
+			t.Fatalf("card owns a task, so it opened a chat turn")
+		}
+		if !strings.Contains(content, "⟦任务结果⟧") {
+			t.Fatalf("card content = %q", content)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate cards: %v", err)
+	}
+	if cards != 1 {
+		t.Fatalf("delivered %d cards for one run, want 1", cards)
+	}
+
+	var chatTasks int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_task_queue WHERE chat_session_id=$1`, sessionID).Scan(&chatTasks); err != nil {
+		t.Fatalf("count chat tasks: %v", err)
+	}
+	if chatTasks != 1 {
+		t.Fatalf("session has %d tasks after delivery, want only the origin turn (1)", chatTasks)
 	}
 }
