@@ -28,6 +28,10 @@ func TestMain(m *testing.M) {
 		runFakeOpencodeStdinHelper()
 		os.Exit(0)
 	}
+	if os.Getenv(piCancelHelperEnv) == "1" {
+		runFakePiCancelHelper()
+		os.Exit(0)
+	}
 	// Cursor lifecycle fixtures re-execute this binary with the CLI's real argv.
 	if mode := os.Getenv(cursorFakeModeEnv); mode != "" {
 		runFakeCursorStream(mode)
