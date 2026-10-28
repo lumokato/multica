@@ -1,9 +1,8 @@
 name: OpenClaw config compatibility smoke
 
+# Personal fork: scheduled runs are disabled; trigger manually if needed.
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "17 6 * * 1"
 
 permissions:
   contents: read

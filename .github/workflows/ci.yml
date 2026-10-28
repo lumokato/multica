@@ -1,12 +1,9 @@
 name: CI
 
+# Personal fork: automatic CI (push, pull request and scheduled runs) is
+# intentionally disabled. Release remains the only workflow that runs by
+# itself. Run this workflow manually when a full CI pass is needed.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  schedule:
-    - cron: "23 3 * * *"
   workflow_dispatch:
 
 concurrency:

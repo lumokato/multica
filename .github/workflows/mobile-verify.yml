@@ -19,27 +19,11 @@ name: Mobile Verify
 # Repository-wide radius checks run once in CI: frontend-build owns them when
 # selected, otherwise frontend-quality handles docs/mobile-only changes.
 
+# Personal fork: no automatic runs; the path filters that guided the old
+# push/pull_request triggers are kept in the workflow history. Trigger this
+# workflow manually when mobile verification is needed.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "apps/mobile/**"
-      - "packages/core/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
-      - "turbo.json"
-      - ".github/workflows/mobile-verify.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "apps/mobile/**"
-      - "packages/core/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
-      - "turbo.json"
-      - ".github/workflows/mobile-verify.yml"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
