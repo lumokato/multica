@@ -11,7 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -19,6 +22,11 @@ import (
 )
 
 const maxOriginChatResultRunes = 8000
+
+// originChatResultNamespace scopes the deterministic ids minted for result
+// cards, so a card's identity can never collide with an id from another
+// origin.
+var originChatResultNamespace = uuid.NewSHA1(uuid.NameSpaceOID, []byte("multica/origin-chat-result"))
 
 // DeliverIssueResultToOriginChat republishes a terminal/status result for a
 // task after an agent or system-driven issue update. It is intentionally
@@ -75,9 +83,78 @@ func (s *TaskService) deliverIssueResultToOriginChat(ctx context.Context, issueT
 	payload := s.loadOriginChatPayload(ctx, issueTask, issue, originTask, agent, result, failureReason, errorText)
 	prefix := s.getIssuePrefix(issue.WorkspaceID)
 	content := formatOriginChatResultWithPrefix(prefix, payload)
-	if _, err := s.SendDirectChatMessage(ctx, session, agent, session.CreatorID, content, nil, "member", session.CreatorID); err != nil {
-		slog.Warn("deliver issue result to origin chat: enqueue failed", "task_id", util.UUIDToString(issueTask.ID), "issue_id", util.UUIDToString(issue.ID), "chat_session_id", util.UUIDToString(session.ID), "error", err)
+	message, created, err := s.insertOriginChatResultMessage(ctx, session, issueTask, content)
+	if err != nil {
+		slog.Warn("deliver issue result to origin chat: persist failed", "task_id", util.UUIDToString(issueTask.ID), "issue_id", util.UUIDToString(issue.ID), "chat_session_id", util.UUIDToString(session.ID), "error", err)
+		return
 	}
+	if !created {
+		// This run already published its card (terminal transition, then an
+		// issue update — or a redelivered webhook). Dropping the repeat is what
+		// keeps one run to one card and one chat turn.
+		return
+	}
+	s.publishOriginChatResultMessage(session, message)
+}
+
+// insertOriginChatResultMessage stores the result card as a server-authored
+// assistant message that owns no task.
+//
+// It deliberately does NOT go through SendDirectChatMessage: that path opens a
+// chat turn, and every card would then enqueue another agent run (64 cards →
+// 64 runs in LS-173). A task-less assistant row is display-only — the runtime's
+// input batch is loaded by task_id, so nothing here can become model input,
+// and an unowned role='user' row would instead be adopted by the next turn's
+// batch and replayed to the agent as if the member had typed it.
+//
+// The primary key is derived from (chat session, delivering task), so a second
+// delivery of the same run collides on the primary key and is dropped instead
+// of appending a duplicate card.
+func (s *TaskService) insertOriginChatResultMessage(ctx context.Context, session db.ChatSession, task db.AgentTaskQueue, content string) (db.ChatMessage, bool, error) {
+	message, err := s.Queries.CreateChatMessage(ctx, db.CreateChatMessageParams{
+		ID:            originChatResultMessageID(session.ID, task.ID),
+		ChatSessionID: session.ID,
+		Role:          "assistant",
+		Content:       content,
+		MessageKind:   pgtype.Text{String: protocol.ChatMessageKindMessage, Valid: true},
+	})
+	if err != nil {
+		if isUniqueViolation(err) {
+			return db.ChatMessage{}, false, nil
+		}
+		return db.ChatMessage{}, false, err
+	}
+	return message, true, nil
+}
+
+// originChatResultMessageID derives the card's id from the pair that makes one
+// delivery unique. Name-based (UUIDv5) rather than random: the id is the
+// idempotency key, so the same run must always derive the same value.
+func originChatResultMessageID(chatSessionID, taskID pgtype.UUID) pgtype.UUID {
+	name := util.UUIDToString(chatSessionID) + ":" + util.UUIDToString(taskID)
+	return pgtype.UUID{Bytes: uuid.NewSHA1(originChatResultNamespace, []byte(name)), Valid: true}
+}
+
+// publishOriginChatResultMessage tells other open clients of the session that
+// the card landed. Without it the row would only appear on the next refetch:
+// this path publishes no task event to drive one.
+func (s *TaskService) publishOriginChatResultMessage(session db.ChatSession, message db.ChatMessage) {
+	if s.Bus == nil || !session.WorkspaceID.Valid || !message.CreatedAt.Valid {
+		return
+	}
+	s.Bus.Publish(events.Event{
+		Type:          protocol.EventChatMessage,
+		WorkspaceID:   util.UUIDToString(session.WorkspaceID),
+		ActorType:     "system",
+		ChatSessionID: util.UUIDToString(session.ID),
+		Payload: protocol.ChatMessagePayload{
+			ChatSessionID: util.UUIDToString(session.ID),
+			MessageID:     util.UUIDToString(message.ID),
+			Role:          message.Role,
+			Content:       message.Content,
+			CreatedAt:     message.CreatedAt.Time.UTC().Format(time.RFC3339Nano),
+		},
+	})
 }
 
 type originChatPayload struct {
