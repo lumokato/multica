@@ -397,6 +397,7 @@ Agent-specific overrides:
 | `MULTICA_HERMES_MODEL` | Override the Hermes model used |
 | `MULTICA_PI_PATH` | Custom path to the `pi` binary |
 | `MULTICA_PI_MODEL` | Override the Pi model used |
+| `MULTICA_PI_BASH_TIMEOUT` | Default timeout for a built-in Pi `bash` call that supplied none (default `10m`; accepts `45s`, `300`, or `10m`; `0`/`off` disables). An explicit tool timeout always wins, so long builds keep their own budget while a hung command can no longer hold a run silent until the two-hour tool watchdog. Custom runtime profiles and `omp` are not covered |
 | `MULTICA_CURSOR_PATH` | Custom path to the `cursor-agent` binary |
 | `MULTICA_CURSOR_MODEL` | Override the Cursor Agent model used |
 | `MULTICA_KIMI_PATH` | Custom path to the `kimi` binary |

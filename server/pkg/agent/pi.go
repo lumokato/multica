@@ -12,8 +12,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -51,6 +53,18 @@ var (
 // once. Ten minutes matches the existing provider-specific semantic-idle
 // precedent while remaining far below the daemon's two-hour fallback.
 const defaultPiTurnErrorGrace = 10 * time.Minute
+
+// piTerminateGraceNanos optionally overrides, in nanoseconds, how long a
+// cancelled Pi process group is given to exit after SIGTERM before it is
+// SIGKILLed. Set via atomic store in tests; zero keeps the default.
+var piTerminateGraceNanos atomic.Int64
+
+func piTerminateGrace() time.Duration {
+	if n := piTerminateGraceNanos.Load(); n > 0 {
+		return time.Duration(n)
+	}
+	return 5 * time.Second
+}
 
 // piTurnErrorGuard owns the only timer associated with a pending Pi turn
 // error. The stream goroutine records protocol activity; the timer callback
@@ -423,17 +437,29 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 		releasePiSessionFileLock(sessionLock)
 		return nil, fmt.Errorf("%s mcp extension: %w", label, err)
 	}
+	toolGuardPath, err := b.preparePiToolGuardExtension()
+	if err != nil {
+		releasePiSessionFileLock(sessionLock)
+		removePiMcpExtension(extensionPath)
+		return nil, fmt.Errorf("%s tool guard extension: %w", label, err)
+	}
 	// Execute owns the temp extension until the process is running. The
 	// reader goroutine takes ownership after start so a launch failure still
 	// deletes the directory, and a running process can read it until exit.
-	releaseExtension := func() { removePiMcpExtension(extensionPath) }
+	releaseExtensions := func() {
+		removePiMcpExtension(extensionPath)
+		removePiToolGuardExtension(toolGuardPath)
+	}
 	defer func() {
-		if releaseExtension != nil {
-			releaseExtension()
+		if releaseExtensions != nil {
+			releaseExtensions()
 		}
 	}()
 	if extensionPath != "" {
 		opts.piMcpExtensionPath = extensionPath
+	}
+	if toolGuardPath != "" {
+		opts.piToolGuardExtensionPath = toolGuardPath
 	}
 
 	runCtx, cancel := runContext(ctx, timeout)
@@ -563,9 +589,10 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 		}
 	}()
 
-	releaseExtension = nil
+	releaseExtensions = nil
 	go func() {
 		defer removePiMcpExtension(extensionPath)
+		defer removePiToolGuardExtension(toolGuardPath)
 		defer func() { releasePiSessionFileLock(sessionLock) }()
 		defer cancelProcess()
 		defer cancel()
@@ -1175,6 +1202,9 @@ func buildPiArgs(sessionPath string, opts ExecOptions, logger *slog.Logger) []st
 	// It stays after custom args so the managed path cannot be mistaken for the
 	// value of an extension-defined flag. A user-provided --approve remains
 	// independent and continues to opt into all project-local Pi resources.
+	if opts.piToolGuardExtensionPath != "" {
+		args = append(args, "--extension", opts.piToolGuardExtensionPath)
+	}
 	if opts.piMcpExtensionPath != "" {
 		args = append(args, "--extension", opts.piMcpExtensionPath)
 	}
@@ -1188,7 +1218,131 @@ const (
 	// capability floor, not a global Pi floor: older Pi installations keep
 	// working for agents without managed MCP configuration.
 	piMcpMinVersion = "0.99.0"
+
+	piToolGuardExtensionDirPrefix = "multica-pi-tool-guard-"
+	// DefaultPiBashTimeoutSeconds bounds a built-in Pi bash call that the model
+	// did not give an explicit timeout. It is a default, not a ceiling: an
+	// explicit timeout still wins, and MULTICA_PI_BASH_TIMEOUT overrides this
+	// value for every built-in Pi run on the host.
+	DefaultPiBashTimeoutSeconds = 600
+	// maxPiBashTimeoutSeconds is floor(math.MaxInt32 / 1000): Pi backs the
+	// timeout with setTimeout, whose 32-bit millisecond ceiling would throw for
+	// anything larger. Values above it are clamped rather than turned off.
+	maxPiBashTimeoutSeconds = 2147483
 )
+
+// preparePiToolGuardExtension writes a throwaway Pi extension that supplies a
+// default timeout to bash tool calls which omitted one. Without it Pi's bash
+// tool has no default timeout at all, so a single hung command can keep a run
+// silent until the daemon's two-hour tool watchdog fires.
+//
+// Only the built-in Pi runtime is covered. omp has its own extension surface,
+// and a custom runtime profile may not accept --extension at all, so neither
+// is changed here.
+func (b *piBackend) preparePiToolGuardExtension() (string, error) {
+	if b.providerLabel == "omp" || !b.cfg.BuiltinRuntime {
+		return "", nil
+	}
+	seconds, ok := piBashTimeoutSeconds(b.cfg.Logger)
+	if !ok {
+		return "", nil
+	}
+	return writePiToolGuardExtension(seconds)
+}
+
+// piBashTimeoutSeconds reads MULTICA_PI_BASH_TIMEOUT. A positive duration
+// ("10m", "300s") or plain seconds ("300") sets the default; "0", "off" and
+// "disabled" turn the guard off. An unparseable value keeps the default and
+// logs a warning rather than silently changing the bound to something else.
+func piBashTimeoutSeconds(logger *slog.Logger) (int, bool) {
+	raw := strings.TrimSpace(os.Getenv("MULTICA_PI_BASH_TIMEOUT"))
+	if raw == "" {
+		return DefaultPiBashTimeoutSeconds, true
+	}
+	switch strings.ToLower(raw) {
+	case "0", "off", "disabled", "none":
+		return 0, false
+	}
+	var seconds int
+	if n, err := strconv.Atoi(raw); err == nil {
+		if n <= 0 {
+			// A negative or zero integer is not the documented disable token.
+			// Falling back to the default is safer than silently removing the
+			// guard, and the warning makes the misconfiguration visible.
+			return invalidPiBashTimeout(logger, raw)
+		}
+		seconds = n
+	} else if d, err := time.ParseDuration(raw); err == nil {
+		if d <= 0 {
+			return invalidPiBashTimeout(logger, raw)
+		}
+		// Round up: a positive sub-second budget must not become 0, because Pi
+		// only arms its timer for a positive timeout.
+		seconds = int(d / time.Second)
+		if d%time.Second != 0 {
+			seconds++
+		}
+	} else {
+		return invalidPiBashTimeout(logger, raw)
+	}
+	if seconds > maxPiBashTimeoutSeconds {
+		if logger != nil {
+			logger.Warn("clamping MULTICA_PI_BASH_TIMEOUT to Pi's maximum",
+				"value", raw, "seconds", seconds, "max_seconds", maxPiBashTimeoutSeconds)
+		}
+		seconds = maxPiBashTimeoutSeconds
+	}
+	return seconds, true
+}
+
+func invalidPiBashTimeout(logger *slog.Logger, raw string) (int, bool) {
+	if logger != nil {
+		logger.Warn("ignoring invalid MULTICA_PI_BASH_TIMEOUT; keeping the default",
+			"value", raw, "default_seconds", DefaultPiBashTimeoutSeconds)
+	}
+	return DefaultPiBashTimeoutSeconds, true
+}
+
+// writePiToolGuardExtension writes tool-timeout.mjs under a
+// multica-pi-tool-guard-* directory. The caller deletes it with
+// removePiToolGuardExtension.
+func writePiToolGuardExtension(timeoutSeconds int) (string, error) {
+	script := fmt.Sprintf(`const DEFAULT_TIMEOUT_SECONDS = %d;
+
+export default function (pi) {
+  pi.on("tool_call", (event) => {
+    if (event.toolName !== "bash") return;
+    const input = event.input;
+    if (!input || typeof input !== "object") return;
+    if (typeof input.timeout === "number" && input.timeout > 0) return;
+    input.timeout = DEFAULT_TIMEOUT_SECONDS;
+  });
+}
+`, timeoutSeconds)
+	dir, err := os.MkdirTemp("", piToolGuardExtensionDirPrefix)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "tool-timeout.mjs")
+	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+		removePiToolGuardExtension(path)
+		return "", err
+	}
+	return path, nil
+}
+
+// removePiToolGuardExtension deletes the temporary extension directory. It
+// refuses any path whose parent is not a multica-pi-tool-guard-* directory.
+func removePiToolGuardExtension(path string) {
+	if path == "" {
+		return
+	}
+	dir := filepath.Dir(path)
+	if !strings.HasPrefix(filepath.Base(dir), piToolGuardExtensionDirPrefix) {
+		return
+	}
+	_ = os.RemoveAll(dir)
+}
 
 // preparePiMcpExtension writes Pi's own temporary extension. omp shares this
 // backend but keeps its project mcp.json, so it never gets this file.

@@ -147,6 +147,9 @@ type ExecOptions struct {
 	// piMcpExtensionPath is set by piBackend.Execute after it writes the
 	// temporary MCP extension. The daemon does not fill it.
 	piMcpExtensionPath string
+	// piToolGuardExtensionPath is set by piBackend.Execute after it writes the
+	// temporary bash-timeout extension. The daemon does not fill it.
+	piToolGuardExtensionPath string
 }
 
 // runContext derives the execution context for an agent subprocess from the
