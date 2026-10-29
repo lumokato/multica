@@ -52,6 +52,9 @@
     "failed_after": "{{elapsed}} 后失败",
     "finished_in": "{{elapsed}} 内结束",
     "no_response": "本轮已结束，智能体没有返回文字回复。",
+    "task_result_badge": "子任务结果",
+    "task_result_caption": "由子任务产出，不是本会话回复",
+    "task_result_output": "执行体输出",
     "failure": {
       "agent_error": "智能体运行时出错，没能完成回复。请重试。",
       "timeout": "智能体处理超时，未能完成。可以重试，或把需求拆得更小一些。",

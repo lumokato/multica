@@ -46,6 +46,7 @@ import type { ChatTimelineItem } from "@multica/core/chat";
 import { buildTimeline } from "../../common/task-transcript";
 import { traceToolArgSummary } from "../../common/task-transcript/trace-event-presenter";
 import { OnboardingStarterCards } from "./onboarding-starter-cards";
+import { TaskResultCard } from "./task-result-card";
 import { TaskStatusPill } from "./task-status-pill";
 import { CHAT_COLUMN, CHAT_GUTTER } from "./chat-column";
 import { FOLLOW_EDGE_THRESHOLD } from "../../common/task-transcript/transcript-follow";
@@ -483,6 +484,13 @@ const MessageBubble = memo(function MessageBubble({
   }
 
   const { message } = item;
+
+  // A sub-issue result card (LS-206) is server-authored and owns no task. It
+  // must not read as this session's reply, so it gets its own card instead of
+  // the assistant bubble.
+  if (message.message_kind === "task_result") {
+    return <TaskResultCard message={message} />;
+  }
 
   if (message.role === "user") {
     return (

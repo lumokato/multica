@@ -21,7 +21,11 @@ export type ChatMessageKind =
   | "message"
   | "no_response"
   | "onboarding_kickoff"
-  | "onboarding_opening";
+  | "onboarding_opening"
+  // Server-authored card reporting a sub-issue task's outcome in the chat that
+  // created the issue (LS-206). Display-only: it owns no task and never becomes
+  // model input.
+  | "task_result";
 
 /**
  * A concise follow-up offered by an assistant reply. `label` is rendered in

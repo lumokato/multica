@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multica/core/i18n/react";
 import { chatKeys } from "@multica/core/chat/queries";
-import type { Attachment, TaskMessagePayload } from "@multica/core/types";
+import type { Attachment, ChatMessage, TaskMessagePayload } from "@multica/core/types";
 import type { ReactElement } from "react";
 import enChat from "../../locales/en/chat.json";
 import zhHansAgents from "../../locales/zh-Hans/agents.json";
@@ -957,5 +957,61 @@ describe("ChatMessageList onboarding starter cards", () => {
       await screen.findByRole("button", { name: "Get a board up in minutes" }),
     ).toBeEnabled();
     expect(screen.getByRole("button", { name: "Later chip" })).toBeEnabled();
+  });
+});
+
+// LS-206: a sub-issue result card must render as its own card, not as this
+// session's assistant reply, and its run output stays folded until asked for.
+describe("ChatMessageList sub-issue result card", () => {
+  const card: ChatMessage = {
+    id: "card-1",
+    chat_session_id: "session-1",
+    role: "assistant",
+    content: [
+      "⟦任务结果⟧ 📋 子任务结果 · PER-303 · in_review · 由「worker」产出（不是本会话回复）",
+      "处理状态：已交主智能体处理",
+      "",
+      "| 项 | 值 |",
+      "|---|---|",
+      "| issue | PER-303 · in_review |",
+      "",
+      "**执行体输出**",
+      "",
+      "finished the work",
+      "⟦任务结果结束⟧",
+    ].join("\n"),
+    task_id: null,
+    created_at: "2026-10-30T00:00:00Z",
+    message_kind: "task_result",
+  };
+
+  it("renders the card with its own framing and folds the output", () => {
+    render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <QueryClientProvider client={new QueryClient()}>
+          <ChatMessageList
+            messages={[card]}
+            pendingTask={null}
+            availability="online"
+          />
+        </QueryClientProvider>
+      </I18nProvider>,
+    );
+
+    const container = screen.getByTestId("task-result-card");
+    expect(container).toHaveAttribute("data-message-kind", "task_result");
+    expect(within(container).getByText("Subtask result")).toBeInTheDocument();
+    expect(
+      within(container).getByText(
+        "子任务结果 · PER-303 · in_review · 由「worker」产出（不是本会话回复）",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(container).getByText("处理状态：已交主智能体处理"),
+    ).toBeInTheDocument();
+    expect(within(container).queryByText("finished the work")).toBeNull();
+
+    fireEvent.click(within(container).getByText("Run output"));
+    expect(within(container).getByText("finished the work")).toBeInTheDocument();
   });
 });

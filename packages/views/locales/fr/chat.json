@@ -54,6 +54,9 @@
     "failed_after": "Échec après {{elapsed}}",
     "finished_in": "Terminé en {{elapsed}}",
     "no_response": "L'agent a terminé ce tour sans réponse textuelle.",
+    "task_result_badge": "Résultat de sous-tâche",
+    "task_result_caption": "Produit par une sous-tâche, pas par cette conversation",
+    "task_result_output": "Sortie d'exécution",
     "failure": {
       "agent_error": "L'agent a rencontré une erreur et n'a pas pu terminer sa réponse. Veuillez réessayer.",
       "timeout": "L'agent a mis trop de temps et s'est arrêté avant de terminer. Réessayez, ou découpez votre demande en étapes plus courtes.",

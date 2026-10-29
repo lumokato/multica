@@ -54,6 +54,9 @@
     "failed_after": "Failed after {{elapsed}}",
     "finished_in": "Finished in {{elapsed}}",
     "no_response": "The agent finished this turn without a text reply.",
+    "task_result_badge": "Subtask result",
+    "task_result_caption": "Produced by a sub-task, not this conversation",
+    "task_result_output": "Run output",
     "failure": {
       "agent_error": "The agent ran into an error and couldn't finish replying. Please try again.",
       "timeout": "The agent took too long and stopped before finishing. Try again, or break your request into smaller steps.",
