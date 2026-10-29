@@ -2104,6 +2104,8 @@ func normalizeMessageKind(kind string) string {
 		return protocol.ChatMessageKindOnboardingKickoff
 	case protocol.ChatMessageKindOnboardingOpening:
 		return protocol.ChatMessageKindOnboardingOpening
+	case protocol.ChatMessageKindTaskResult:
+		return protocol.ChatMessageKindTaskResult
 	default:
 		return protocol.ChatMessageKindMessage
 	}

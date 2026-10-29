@@ -286,6 +286,12 @@ const (
 	// the opening self-describes: chat renders the starter cards under this
 	// kind instead of quick-action chips (MUL-5765).
 	ChatMessageKindOnboardingOpening = "onboarding_opening"
+	// ChatMessageKindTaskResult marks the server-authored card that reports a
+	// sub-issue task's outcome in the chat that created the issue (LS-206). The
+	// card owns no task, so it is display-only: the member's conversation shows
+	// it, while the origin agent's run continues on the sub-issue itself. Older
+	// clients that predate this kind render it as an ordinary assistant message.
+	ChatMessageKindTaskResult = "task_result"
 )
 
 // ChatDonePayload is broadcast when an agent finishes responding to a chat

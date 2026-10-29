@@ -523,6 +523,22 @@ WHERE issue_id = @issue_id
 ORDER BY created_at ASC, id ASC
 LIMIT 1;
 
+-- name: GetTaskResultHandoffComment :one
+-- LS-206: the visible record that a terminal sub-issue result was handed back
+-- to the origin chat agent. The source task row is locked by the caller before
+-- this lookup/insert pair, so (issue, source task) is a durable idempotency
+-- key without a schema change. The content marker separates this record from
+-- the delegated-failure signal, which also stores source_task_id.
+SELECT * FROM comment
+WHERE issue_id = @issue_id
+  AND workspace_id = @workspace_id
+  AND author_type = 'system'
+  AND type = 'system'
+  AND source_task_id = @source_task_id
+  AND content LIKE '⟦任务结果交接⟧%'
+ORDER BY created_at ASC, id ASC
+LIMIT 1;
+
 -- name: UpdateComment :one
 WITH locked_issue AS MATERIALIZED (
     -- Keep the global issue -> child lock order used by issue teardown. The

@@ -2543,6 +2543,75 @@ func (q *Queries) ListPendingChatTasksForSession(ctx context.Context, chatSessio
 	return items, nil
 }
 
+const listTaskResultMessagesAfterPreviousChatTask = `-- name: ListTaskResultMessagesAfterPreviousChatTask :many
+SELECT message.id, message.chat_session_id, message.role, message.content, message.task_id, message.created_at, message.failure_reason, message.elapsed_ms, message.message_kind, message.channel_media_pending_until, message.channel_ingested, message.quick_actions, message.channel_context_revision, message.channel_outbound_type, message.channel_outbound_installation_id, message.channel_outbound_chat_id, message.channel_outbound_message_ids, message.channel_typing_settled
+FROM chat_message AS message
+WHERE message.chat_session_id = $1
+  AND message.message_kind = 'task_result'
+  AND message.created_at > COALESCE(
+      (SELECT prev.created_at
+       FROM agent_task_queue AS prev
+       WHERE prev.chat_session_id = $1
+         AND prev.id <> $2
+       ORDER BY prev.created_at DESC, prev.id DESC
+       LIMIT 1),
+      to_timestamp(0)
+  )
+ORDER BY message.created_at DESC, message.id DESC
+LIMIT $3
+`
+
+type ListTaskResultMessagesAfterPreviousChatTaskParams struct {
+	ChatSessionID pgtype.UUID `json:"chat_session_id"`
+	CurrentTaskID pgtype.UUID `json:"current_task_id"`
+	MaxRows       int32       `json:"max_rows"`
+}
+
+// LS-206: sub-issue result cards that arrived after this session's previous
+// chat turn started. They are task-less assistant rows, so the input batch
+// above can never carry them; the claim appends a bounded summary instead. The
+// previous task is the newest OTHER task in the session — the current task is
+// excluded because its own created_at would hide the cards that arrived while
+// the member was typing this turn.
+func (q *Queries) ListTaskResultMessagesAfterPreviousChatTask(ctx context.Context, arg ListTaskResultMessagesAfterPreviousChatTaskParams) ([]ChatMessage, error) {
+	rows, err := q.db.Query(ctx, listTaskResultMessagesAfterPreviousChatTask, arg.ChatSessionID, arg.CurrentTaskID, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ChatMessage{}
+	for rows.Next() {
+		var i ChatMessage
+		if err := rows.Scan(
+			&i.ID,
+			&i.ChatSessionID,
+			&i.Role,
+			&i.Content,
+			&i.TaskID,
+			&i.CreatedAt,
+			&i.FailureReason,
+			&i.ElapsedMs,
+			&i.MessageKind,
+			&i.ChannelMediaPendingUntil,
+			&i.ChannelIngested,
+			&i.QuickActions,
+			&i.ChannelContextRevision,
+			&i.ChannelOutboundType,
+			&i.ChannelOutboundInstallationID,
+			&i.ChannelOutboundChatID,
+			&i.ChannelOutboundMessageIds,
+			&i.ChannelTypingSettled,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUnownedChannelChatContextRevisions = `-- name: ListUnownedChannelChatContextRevisions :many
 WITH pending AS (
     SELECT DISTINCT COALESCE(channel_context_revision, 1)::bigint AS context_revision

@@ -914,6 +914,29 @@ SELECT * FROM chat_message
 WHERE task_id = $1 AND role = 'user'
 ORDER BY created_at ASC, id ASC;
 
+-- name: ListTaskResultMessagesAfterPreviousChatTask :many
+-- LS-206: sub-issue result cards that arrived after this session's previous
+-- chat turn started. They are task-less assistant rows, so the input batch
+-- above can never carry them; the claim appends a bounded summary instead. The
+-- previous task is the newest OTHER task in the session — the current task is
+-- excluded because its own created_at would hide the cards that arrived while
+-- the member was typing this turn.
+SELECT message.*
+FROM chat_message AS message
+WHERE message.chat_session_id = @chat_session_id
+  AND message.message_kind = 'task_result'
+  AND message.created_at > COALESCE(
+      (SELECT prev.created_at
+       FROM agent_task_queue AS prev
+       WHERE prev.chat_session_id = @chat_session_id
+         AND prev.id <> @current_task_id
+       ORDER BY prev.created_at DESC, prev.id DESC
+       LIMIT 1),
+      to_timestamp(0)
+  )
+ORDER BY message.created_at DESC, message.id DESC
+LIMIT @max_rows;
+
 -- name: ListChatMessagesPageForChannelContext :many
 -- Agent-only transcript projection. UI readers continue using the unfiltered
 -- ListChatMessagesPage query, while a channel task can see only the context

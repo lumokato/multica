@@ -660,6 +660,57 @@ func (q *Queries) GetLatestMemberCommentForIssueSince(ctx context.Context, arg G
 	return i, err
 }
 
+const getTaskResultHandoffComment = `-- name: GetTaskResultHandoffComment :one
+SELECT id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id, resolved_at, resolved_by_type, resolved_by_id, source_task_id, quick_action_id, via_plugin_id, revision, recovery_settled_at, deleted_at, suppressed_agent_ids FROM comment
+WHERE issue_id = $1
+  AND workspace_id = $2
+  AND author_type = 'system'
+  AND type = 'system'
+  AND source_task_id = $3
+  AND content LIKE '⟦任务结果交接⟧%'
+ORDER BY created_at ASC, id ASC
+LIMIT 1
+`
+
+type GetTaskResultHandoffCommentParams struct {
+	IssueID      pgtype.UUID `json:"issue_id"`
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	SourceTaskID pgtype.UUID `json:"source_task_id"`
+}
+
+// LS-206: the visible record that a terminal sub-issue result was handed back
+// to the origin chat agent. The source task row is locked by the caller before
+// this lookup/insert pair, so (issue, source task) is a durable idempotency
+// key without a schema change. The content marker separates this record from
+// the delegated-failure signal, which also stores source_task_id.
+func (q *Queries) GetTaskResultHandoffComment(ctx context.Context, arg GetTaskResultHandoffCommentParams) (Comment, error) {
+	row := q.db.QueryRow(ctx, getTaskResultHandoffComment, arg.IssueID, arg.WorkspaceID, arg.SourceTaskID)
+	var i Comment
+	err := row.Scan(
+		&i.ID,
+		&i.IssueID,
+		&i.AuthorType,
+		&i.AuthorID,
+		&i.Content,
+		&i.Type,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ParentID,
+		&i.WorkspaceID,
+		&i.ResolvedAt,
+		&i.ResolvedByType,
+		&i.ResolvedByID,
+		&i.SourceTaskID,
+		&i.QuickActionID,
+		&i.ViaPluginID,
+		&i.Revision,
+		&i.RecoverySettledAt,
+		&i.DeletedAt,
+		&i.SuppressedAgentIds,
+	)
+	return i, err
+}
+
 const getThreadRoot = `-- name: GetThreadRoot :one
 WITH RECURSIVE root_of AS (
     SELECT c.id, c.parent_id

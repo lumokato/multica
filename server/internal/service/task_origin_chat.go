@@ -81,6 +81,15 @@ func (s *TaskService) deliverIssueResultToOriginChat(ctx context.Context, issueT
 	}
 
 	payload := s.loadOriginChatPayload(ctx, issueTask, issue, originTask, agent, result, failureReason, errorText)
+	// LS-206: a result that needs action wakes the origin chat agent on the
+	// sub-issue. The card itself never opens a chat turn; it only reports
+	// whether the result was handed off.
+	payload.Processing = "仅展示"
+	if handled, handoffErr := s.handoffOriginChatResult(ctx, issue, agent, issueTask); handoffErr != nil {
+		slog.Warn("deliver issue result to origin chat: handoff failed", "task_id", util.UUIDToString(issueTask.ID), "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agent.ID), "error", handoffErr)
+	} else if handled {
+		payload.Processing = "已交主智能体处理"
+	}
 	prefix := s.getIssuePrefix(issue.WorkspaceID)
 	content := formatOriginChatResultWithPrefix(prefix, payload)
 	message, created, err := s.insertOriginChatResultMessage(ctx, session, issueTask, content)
@@ -116,7 +125,7 @@ func (s *TaskService) insertOriginChatResultMessage(ctx context.Context, session
 		ChatSessionID: session.ID,
 		Role:          "assistant",
 		Content:       content,
-		MessageKind:   pgtype.Text{String: protocol.ChatMessageKindMessage, Valid: true},
+		MessageKind:   pgtype.Text{String: protocol.ChatMessageKindTaskResult, Valid: true},
 	})
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -168,6 +177,9 @@ type originChatPayload struct {
 	PRURL      string
 	Failure    string
 	Error      string
+	// Processing is the card's "what happened to this result" line: handed to
+	// the origin agent on the sub-issue, or display-only in the conversation.
+	Processing string
 }
 
 func (s *TaskService) loadOriginChatPayload(ctx context.Context, task db.AgentTaskQueue, issue db.Issue, originTask db.AgentTaskQueue, chatAgent db.Agent, result []byte, failureReason, errorText string) originChatPayload {
@@ -240,7 +252,8 @@ func formatOriginChatResultWithPrefix(prefix string, p originChatPayload) string
 		status += "（待负责人审核）"
 	}
 	rows := []string{
-		fmt.Sprintf("⟦任务结果⟧ 📋 %s", key),
+		fmt.Sprintf("⟦任务结果⟧ 📋 子任务结果 · %s · %s · 由「%s」产出（不是本会话回复）", key, status, safeCell(p.Agent.Name)),
+		fmt.Sprintf("处理状态：%s", p.Processing),
 		"",
 		"| 项 | 值 |",
 		"|---|---|",
@@ -483,4 +496,31 @@ func redactOriginChatURLs(body string) string {
 
 func isNoRows(err error) bool {
 	return err != nil && (err == pgx.ErrNoRows || strings.Contains(err.Error(), pgx.ErrNoRows.Error()))
+}
+
+// TaskResultCardSummary renders one delivered result card as the compact text
+// appended to the origin agent's next chat prompt (LS-206). The card is the
+// only durable carrier of the sub-task identity, so the summary reuses its
+// header line (issue key, status, producing agent) and its output body instead
+// of re-reading the issue.
+func TaskResultCardSummary(content string, maxRunes int) string {
+	header, body, _ := strings.Cut(content, "\n")
+	header = strings.TrimSpace(header)
+	header = strings.TrimSpace(strings.TrimPrefix(header, "⟦任务结果⟧"))
+	header = strings.TrimSpace(strings.TrimPrefix(header, "📋"))
+	if header == "" {
+		header = "子任务结果"
+	}
+	if idx := strings.Index(content, "**执行体输出**"); idx >= 0 {
+		body = strings.TrimSpace(content[idx+len("**执行体输出**"):])
+		body = strings.TrimSpace(strings.TrimSuffix(body, "⟦任务结果结束⟧"))
+	}
+	if body == "" {
+		return header
+	}
+	runes := []rune(body)
+	if maxRunes > 0 && len(runes) > maxRunes {
+		body = string(runes[:maxRunes-1]) + "…"
+	}
+	return header + "\n" + body
 }

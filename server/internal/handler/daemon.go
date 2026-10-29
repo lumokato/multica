@@ -3827,6 +3827,15 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		if strings.TrimSpace(resp.ThreadName) == "" && resp.ChatMessage != "" {
 			resp.ThreadName = resp.ChatMessage
 		}
+
+		// LS-206: result cards are task-less rows, so the input batch above can
+		// never carry them. Append a bounded recap of what arrived since the
+		// previous turn; the member's own message stays the first block.
+		if strings.TrimSpace(resp.ChatMessage) != "" {
+			if summary := h.taskResultSummaryForClaim(r.Context(), *task, cs.ID); summary != "" {
+				resp.ChatMessage += "\n\n" + summary
+			}
+		}
 	}
 
 	// Autopilot run_only task: resolve workspace from autopilot_run →
