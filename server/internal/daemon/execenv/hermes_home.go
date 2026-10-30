@@ -24,7 +24,8 @@ import (
 //
 // Keep memories, state.db and its journals overlay-owned, using agent-scoped
 // memory and conversation-scoped session stores when available. Disable external
-// memory providers to prevent cross-task sharing.
+// memory providers to prevent cross-task sharing, unless the daemon explicitly
+// opted into one (MULTICA_HERMES_MEMORY_PROVIDER).
 //
 // Setup does not modify the shared home. Mirrored auth and other entries remain
 // writable symlinks, so runtime updates through them intentionally reach the host.
@@ -637,8 +638,10 @@ func writeDerivedHermesConfig(sharedHome, hermesHome string, env map[string]stri
 	}
 	// Disable any host-configured external memory backend (memory.provider) so a
 	// Supermemory/Hindsight/etc. bank isn't shared across managed tasks; the
-	// built-in per-task memories/ dir is already isolated above.
-	disableHermesMemoryProvider(&doc)
+	// built-in per-task memories/ dir is already isolated above. A daemon that
+	// opted in (MULTICA_HERMES_MEMORY_PROVIDER) keeps exactly the provider its
+	// shared config selects. See hermes_memory_provider.go.
+	applyHermesMemoryProviderPolicy(&doc)
 	return marshalYAMLToFile(&doc, dstConfig)
 }
 
