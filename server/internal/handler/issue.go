@@ -299,15 +299,54 @@ func (h *Handler) updateIssueWithStatusGuard(ctx context.Context, workspaceID pg
 // run it inside the status write's transaction and broadcast the returned runs
 // after commit.
 func updateIssueStoppingWakeups(ctx context.Context, q *db.Queries, params db.UpdateIssueParams) (db.Issue, []db.AgentTaskQueue, error) {
+	previous, observing := observeStatusChange(ctx, q, params)
 	issue, err := q.UpdateIssue(ctx, params)
 	if err != nil || !params.Status.Valid {
 		return issue, nil, err
+	}
+	if observing {
+		recordShadowStatusChange(previous, issue)
 	}
 	cancelled, err := service.StopClosedIssueWakeups(ctx, q, issue)
 	if err != nil {
 		return db.Issue{}, nil, fmt.Errorf("stop closed issue wakeups: %w", err)
 	}
 	return issue, cancelled, nil
+}
+
+// observeStatusChange reads the pre-write status when the guard is allowed to
+// look. It never fails the write: a guard that cannot observe must not deny.
+func observeStatusChange(ctx context.Context, q *db.Queries, params db.UpdateIssueParams) (db.Issue, bool) {
+	if !params.Status.Valid || !issueguard.Current().Observes() {
+		return db.Issue{}, false
+	}
+	previous, err := q.GetIssue(ctx, params.ID)
+	if err != nil {
+		return db.Issue{}, false
+	}
+	return previous, true
+}
+
+// recordShadowStatusChange logs what the completion contract would have said
+// about this transition. It cannot change the outcome — enforcement is a later
+// stage — so the only cost of a wrong judgement here is a wrong log line.
+func recordShadowStatusChange(previous, updated db.Issue) {
+	if previous.Status == updated.Status {
+		return
+	}
+	violations := issueguard.CheckStatusChange(issueguard.StatusChange{
+		From: previous.Status,
+		To:   updated.Status,
+	})
+	event := issueguard.NewShadowEvent(
+		issueguard.Current(),
+		uuidToString(updated.ID),
+		updated.Number,
+		previous.Status,
+		updated.Status,
+		violations,
+	)
+	slog.Info("issue_status_guard", event.Fields()...)
 }
 
 func (h *Handler) broadcastCancelledWakeups(ctx context.Context, workspaceID pgtype.UUID, cancelled []db.AgentTaskQueue) {
